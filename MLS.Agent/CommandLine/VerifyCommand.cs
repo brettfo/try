@@ -11,7 +11,7 @@ using Microsoft.DotNet.Try.Project;
 using Microsoft.DotNet.Try.Protocol;
 using MLS.Agent.Markdown;
 using WorkspaceServer;
-using WorkspaceServer.Servers.Roslyn;
+using WorkspaceServer.Servers;
 using Buffer = Microsoft.DotNet.Try.Protocol.Buffer;
 
 namespace MLS.Agent.CommandLine
@@ -31,7 +31,7 @@ namespace MLS.Agent.CommandLine
                 packageRegistry,
                 startupOptions);
             var errorCount = 0;
-            var workspaceServer = new Lazy<RoslynWorkspaceServer>(() => new RoslynWorkspaceServer(packageRegistry));
+            var workspaceServer = new Lazy<IWorkspaceServer>(() => new WorkspaceServerMultiplexer(packageRegistry));
 
             var markdownFiles = markdownProject.GetAllMarkdownFiles().ToArray();
 
