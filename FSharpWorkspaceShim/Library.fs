@@ -2,9 +2,23 @@ namespace FSharpWorkspaceShim
 
 open System
 open System.IO
+open FSharp.Compiler.Range
 open FSharp.Compiler.SourceCodeServices
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.Text
+
+type SignatureHelpParameter = {
+    Name: string
+    Label: string
+    Documentation: string
+}
+
+type SignatureHelpItem = {
+    Name: string
+    Label: string
+    Documentation: string
+    Parameters: SignatureHelpParameter[]
+}
 
 module Shim =
 
@@ -71,22 +85,25 @@ module Shim =
         let descriptor = new DiagnosticDescriptor(id, emptyString, description, error.Subcategory, severity, true, emptyString, String.Empty, customTags)
         Diagnostic.Create(descriptor, location)
 
+    let private getProjectOptions (projectPath: string) (files: string[]) =
+        {
+            ProjectFileName = projectPath
+            ProjectId = None
+            SourceFiles = files
+            OtherOptions = [||]
+            ReferencedProjects = [||]
+            IsIncompleteTypeCheckEnvironment = false
+            UseScriptResolutionRules = false
+            LoadTime = DateTime.Now
+            UnresolvedReferences = None
+            OriginalLoadReferences = []
+            ExtraProjectInfo = None
+            Stamp = None
+        }
+
     let GetDiagnostics (projectPath: string) (files: string[]) (pathMapSource: string) (pathMapDest: string) =
         async {
-            let projectOptions = {
-                ProjectFileName = projectPath
-                ProjectId = None
-                SourceFiles = files
-                OtherOptions = [||]
-                ReferencedProjects = [||]
-                IsIncompleteTypeCheckEnvironment = false
-                UseScriptResolutionRules = false
-                LoadTime = DateTime.Now
-                UnresolvedReferences = None
-                OriginalLoadReferences = []
-                ExtraProjectInfo = None
-                Stamp = None
-            }
+            let projectOptions = getProjectOptions projectPath files
             let ensureDirectorySeparator (path: string) =
                 if path.EndsWith(Path.DirectorySeparatorChar |> string) |> not then path + (string Path.DirectorySeparatorChar)
                 else path
@@ -127,4 +144,92 @@ module Shim =
                         Some(convertError error location))
                 |> Seq.toArray
             return diagnostics
+        } |> Async.StartAsTask
+
+    let oneColAfter (lp: LinePosition) = LinePosition(lp.Line, lp.Character + 1)
+    let oneColBefore (lp: LinePosition) = LinePosition(lp.Line, max 0 (lp.Character - 1))
+
+    let GetSignatureHelp (projectPath: string) (files: string[]) (currentFilePath: string) (triggerCharacter: Nullable<char>) (lineNumber: int) (columnNumber: int) =
+        async {
+            // adapted from https://github.com/dotnet/fsharp/blob/master/vsintegration/src/FSharp.Editor/Completion/SignatureHelp.fs
+            let empty = Array.zeroCreate<SignatureHelpItem> 0
+            let projectOptions = getProjectOptions projectPath files
+            let textVersionHash = 0
+            let fileText = File.ReadAllText(currentFilePath)
+            let! parseResults, checkFileAnswer = checker.ParseAndCheckFileInProject(currentFilePath, textVersionHash, fileText, projectOptions)
+            match checkFileAnswer with
+            | FSharpCheckFileAnswer.Aborted -> return empty
+            | FSharpCheckFileAnswer.Succeeded(checkFileResults) ->
+                let textLines = File.ReadAllLines(currentFilePath)
+                let paramLocations = parseResults.FindNoteworthyParamInfoLocations(Pos.fromZ lineNumber columnNumber)
+                match paramLocations with
+                | None -> return empty
+                | Some(paramLocations) ->
+                    // get methods
+                    let names = paramLocations.LongId
+                    let endLocation = paramLocations.LongIdEndLocation
+                    let! methodGroup = checkFileResults.GetMethods(endLocation.Line, endLocation.Column, "", Some names)
+                    let methods = methodGroup.Methods
+                    if methods.Length = 0 || methodGroup.MethodName.EndsWith("> )") then return empty
+                    else
+                        let isStaticArgTip =
+                            let parenLine, parenCol = Pos.toZ paramLocations.OpenParenLocation
+                            let parenLineText = textLines.[parenLine]
+                            parenCol < parenLineText.Length && parenLineText.[parenCol] = '<'
+                        let filteredMethods =
+                            [| for m in methods do
+                                if (isStaticArgTip && m.StaticParameters.Length > 0) ||
+                                    (not isStaticArgTip && m.HasParameters) then
+                                    yield m |]
+                        if filteredMethods.Length = 0 then return empty
+                        else
+                            let posToLinePosition pos =
+                                let l, c = Pos.toZ pos
+                                // FSROSLYNTODO: FCS gives back line counts that are too large. Really, this shouldn't happen
+                                let result = LinePosition(l, c)
+                                let lastPosInDocument = LinePosition(textLines.Length - 1, textLines.[textLines.Length - 1].Length)
+                                if lastPosInDocument.CompareTo(result) > 0 then result else lastPosInDocument
+
+                            // Compute the start position
+                            let startPos = paramLocations.LongIdStartLocation |> posToLinePosition
+
+                            // Compute the end position
+                            let endPos =
+                                let last = paramLocations.TupleEndLocations.[paramLocations.TupleEndLocations.Length - 1] |> posToLinePosition
+                                (if paramLocations.IsThereACloseParen then oneColBefore last else last)
+
+                            assert (startPos.CompareTo(endPos) <= 0)
+
+                            // Compute the applicable span between the parentheses
+                            let applicableSpan =
+                                textLines.GetTextSpan(LinePositionSpan(startPos, endPos))
+
+                            let startOfArgs = paramLocations.OpenParenLocation |> posToLinePosition |> oneColAfter
+
+                            let tupleEnds =
+                                [|  yield startOfArgs
+                                    for i in 0..paramLocations.TupleEndLocations.Length-2 do
+                                       yield paramLocations.TupleEndLocations.[i] |> posToLinePosition
+                                    yield endPos |]
+                            match Option.ofNullable triggerCharacter with
+                            | Some('<' | '(' | ',') when not (tupleEnds |> Array.exists (fun lp -> lp.Character = columnNumber)) -> return empty
+                            | _ ->
+                                // Compute the argument index by working out where the caret is between the various commas.
+                                let argumentIndex = 
+                                    let computedTextSpans =
+                                        tupleEnds 
+                                        |> Array.pairwise 
+                                        |> Array.map (fun (lp1, lp2) -> textLines.GetTextSpan(LinePositionSpan(lp1, lp2)))
+                                        
+                                    match (computedTextSpans|> Array.tryFindIndex (fun t -> t.Contains(caretPosition))) with 
+                                    | None -> 
+                                        // Because 'TextSpan.Contains' only succeeds if 'TextSpan.Start <= caretPosition < TextSpan.End' is true,
+                                        // we need to check if the caret is at the very last position in the TextSpan.
+                                        //
+                                        // We default to 0, which is the first argument, if the caret position was nowhere to be found.
+                                        if computedTextSpans.[computedTextSpans.Length-1].End = caretPosition then
+                                            computedTextSpans.Length-1 
+                                        else 0
+                                    | Some n -> n
+                                return empty
         } |> Async.StartAsTask

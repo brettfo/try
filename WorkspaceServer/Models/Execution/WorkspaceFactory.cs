@@ -18,7 +18,9 @@ namespace WorkspaceServer.Models.Execution
             string workspaceType,
             bool includeInstrumentation = false)
         {
-            var filesOnDisk = directory.GetFiles("*.cs", SearchOption.AllDirectories)
+            var csharpFiles = directory.GetFiles("*.cs", SearchOption.AllDirectories);
+            var fsharpFiles = directory.GetFiles("*.fs", SearchOption.AllDirectories);
+            var filesOnDisk = csharpFiles.Concat(fsharpFiles)
                                        .Where(f => !f.IsBuildOutput())
                                        .ToArray();
 

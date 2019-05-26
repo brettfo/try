@@ -5,6 +5,7 @@ using Clockwise;
 using FSharpWorkspaceShim;
 using Microsoft.DotNet.Try.Project;
 using Microsoft.DotNet.Try.Protocol;
+using WorkspaceServer.Models.Execution;
 using WorkspaceServer.Packaging;
 using WorkspaceServer.Servers.Roslyn;
 using WorkspaceServer.Transformations;
@@ -18,7 +19,7 @@ namespace WorkspaceServer.Servers.FSharp
     public partial class FSharpWorkspaceServer : IWorkspaceServer
     {
         private readonly IPackageFinder _packageFinder;
-        private readonly IWorkspaceTransformer _transformer = new BufferInliningTransformer();
+        private readonly IWorkspaceTransformer _transformer = new FSharpBufferInliningTransformer();
 
         public FSharpWorkspaceServer(IPackageFinder packageRegistry)
         {
@@ -54,10 +55,18 @@ namespace WorkspaceServer.Servers.FSharp
             return new DiagnosticResult(serializableDiagnostics, request.RequestId);
         }
 
-        public Task<SignatureHelpResult> GetSignatureHelp(WorkspaceRequest request, Budget budget = null)
+        public async Task<SignatureHelpResult> GetSignatureHelp(WorkspaceRequest request, Budget budget = null)
         {
-            // TODO:
-            return Task.FromResult(new SignatureHelpResult());
+            var workspace = request.Workspace;
+            var package = await _packageFinder.Find<Package>(workspace.WorkspaceType);
+            workspace = await _transformer.TransformAsync(workspace);
+            var packageWithChanges = await CreatePackageWithChanges(package, workspace);
+            var packageFiles = packageWithChanges.GetFiles();
+            char? triggerCharacter = null;
+            var absolutePosition = workspace.GetAbsolutePositionForGetBufferWithSpecifiedIdOrSingleBufferIfThereIsOnlyOne(request.ActiveBufferId);
+            var signatureHelpItems = await Shim.GetSignatureHelp(packageWithChanges.Name, packageFiles, request.ActiveBufferId.FileName, triggerCharacter, 0, 0);
+            // TODO: convert SignatureHelpItems
+            return new SignatureHelpResult(signatureHelpItems, diagnostics: null, requestId: request.RequestId);
         }
 
         public async Task<RunResult> Run(WorkspaceRequest request, Budget budget = null)
