@@ -160,7 +160,9 @@
     </PropertyGroup>
     <ItemGroup>
       <ClientInputFiles Include="$(ClientInputDir)\**" />
+      <ClientInputFiles Remove="$(ClientInputDir)\node_modules\**" />
       <TryDotNetJsInput Include="$(TryDotNetJsInputDir)\**" />
+      <TryDotNetJsInput Remove="$(TryDotNetJsInputDir)\node_modules\**" />
     </ItemGroup>
   </Target>
 
